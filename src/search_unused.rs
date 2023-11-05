@@ -11,7 +11,6 @@ use std::{
     error::{self, Error},
     path::{Path, PathBuf},
 };
-use walkdir::WalkDir;
 
 use crate::UseCargoMetadata;
 #[cfg(test)]
@@ -146,10 +145,23 @@ fn collect_paths(dir_path: &Path, analysis: &PackageAnalysis) -> Vec<PathBuf> {
         trace!("adding src/ since paths was empty");
     }
 
+    // Unfortunately WalkBuilder does not implement `std::iter::FromIterator`.
+    let walk_builder = {
+        let mut roots = root_paths.into_iter().map(|p| dir_path.join(p));
+        let builder = ignore::WalkBuilder::new(
+            roots
+                .next()
+                .unwrap_or_else(|| unreachable!("root_paths should contain at least one entry")),
+        );
+        roots.fold(builder, |mut builder, root| {
+            builder.add(root);
+            builder
+        })
+    };
+
     // Collect all final paths for the crate first.
-    let paths: Vec<PathBuf> = root_paths
-        .iter()
-        .flat_map(|root| WalkDir::new(dir_path.join(root)).into_iter())
+    let paths = walk_builder
+        .build()
         .filter_map(|result| {
             let dir_entry = match result {
                 Ok(dir_entry) => dir_entry,
@@ -158,7 +170,7 @@ fn collect_paths(dir_path: &Path, analysis: &PackageAnalysis) -> Vec<PathBuf> {
                     return None;
                 }
             };
-            if !dir_entry.file_type().is_file() {
+            if !dir_entry.file_type()?.is_file() {
                 return None;
             }
             if dir_entry

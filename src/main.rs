@@ -6,7 +6,6 @@ use rayon::prelude::*;
 use std::path::Path;
 use std::str::FromStr;
 use std::{fs, path::PathBuf};
-use walkdir::WalkDir;
 
 #[derive(Clone, Copy)]
 pub(crate) enum UseCargoMetadata {
@@ -62,6 +61,10 @@ struct MacheteArgs {
     #[argh(switch)]
     fix: bool,
 
+    /// respect ignore files (.gitignore, .ignore, etc.) when searching for files.
+    #[argh(switch)]
+    ignore: bool,
+
     /// print version.
     #[argh(switch)]
     version: bool,
@@ -71,21 +74,25 @@ struct MacheteArgs {
     paths: Vec<PathBuf>,
 }
 
-fn collect_paths(path: &Path, skip_target_dir: bool) -> Result<Vec<PathBuf>, walkdir::Error> {
+fn collect_paths(
+    path: &Path,
+    skip_target_dir: bool,
+    respect_ignore_files: bool,
+) -> Result<Vec<PathBuf>, ignore::Error> {
     // Find directory entries.
-    let walker = WalkDir::new(path).into_iter();
+    let mut builder = ignore::WalkBuilder::new(path);
 
-    let manifest_path_entries = if skip_target_dir {
-        walker
-            .filter_entry(|entry| !entry.path().ends_with("target"))
-            .collect()
-    } else {
-        walker.collect::<Vec<_>>()
-    };
+    builder.standard_filters(respect_ignore_files);
+
+    if skip_target_dir {
+        builder.filter_entry(|entry| !entry.path().ends_with("target"));
+    }
+
+    let walker = builder.build();
 
     // Keep only errors and `Cargo.toml` files (filter), then map correct paths into owned
     // `PathBuf`.
-    manifest_path_entries
+    walker
         .into_iter()
         .filter(|entry| match entry {
             Ok(entry) => entry.file_name() == "Cargo.toml",
@@ -142,7 +149,7 @@ fn run_machete() -> anyhow::Result<bool> {
     let mut walkdir_errors = Vec::new();
 
     for path in args.paths {
-        let manifest_path_entries = match collect_paths(&path, args.skip_target_dir) {
+        let manifest_path_entries = match collect_paths(&path, args.skip_target_dir, args.ignore) {
             Ok(entries) => entries,
             Err(err) => {
                 walkdir_errors.push(err);
@@ -291,11 +298,20 @@ fn test_ignore_target() {
     let entries = collect_paths(
         &PathBuf::from(TOP_LEVEL).join("./integration-tests/with-target/"),
         true,
+        false,
     );
     assert!(entries.unwrap().is_empty());
 
     let entries = collect_paths(
         &PathBuf::from(TOP_LEVEL).join("./integration-tests/with-target/"),
+        false,
+        true,
+    );
+    assert!(entries.unwrap().is_empty());
+
+    let entries = collect_paths(
+        &PathBuf::from(TOP_LEVEL).join("./integration-tests/with-target/"),
+        false,
         false,
     );
     assert!(!entries.unwrap().is_empty());
