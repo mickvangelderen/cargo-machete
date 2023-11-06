@@ -1,3 +1,7 @@
+use crate::ignore_ext::WalkBuilderExt;
+use crate::UseCargoMetadata;
+#[cfg(test)]
+use crate::TOP_LEVEL;
 use cargo_metadata::CargoOpt;
 use grep::{
     matcher::LineTerminator,
@@ -11,10 +15,6 @@ use std::{
     error::{self, Error},
     path::{Path, PathBuf},
 };
-
-use crate::UseCargoMetadata;
-#[cfg(test)]
-use crate::TOP_LEVEL;
 
 use self::meta::PackageMetadata;
 
@@ -145,19 +145,9 @@ fn collect_paths(dir_path: &Path, analysis: &PackageAnalysis) -> Vec<PathBuf> {
         trace!("adding src/ since paths was empty");
     }
 
-    // Unfortunately WalkBuilder does not implement `std::iter::FromIterator`.
-    let walk_builder = {
-        let mut roots = root_paths.into_iter().map(|p| dir_path.join(p));
-        let builder = ignore::WalkBuilder::new(
-            roots
-                .next()
-                .unwrap_or_else(|| unreachable!("root_paths should contain at least one entry")),
-        );
-        roots.fold(builder, |mut builder, root| {
-            builder.add(root);
-            builder
-        })
-    };
+    let walk_builder =
+        ignore::WalkBuilder::try_from_iter(root_paths.into_iter().map(|path| dir_path.join(path)))
+            .unwrap_or_else(|| unreachable!("root_paths should contain at least one entry"));
 
     // Collect all final paths for the crate first.
     let paths = walk_builder

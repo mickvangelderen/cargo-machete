@@ -1,7 +1,10 @@
+mod ignore_ext;
 mod search_unused;
 
 use crate::search_unused::find_unused;
 use anyhow::Context;
+use ignore::DirEntry;
+use ignore_ext::DirEntryExt;
 use rayon::prelude::*;
 use std::path::Path;
 use std::str::FromStr;
@@ -74,7 +77,15 @@ struct MacheteArgs {
     paths: Vec<PathBuf>,
 }
 
-fn collect_paths(
+fn is_manifest_file(dir_entry: &DirEntry) -> bool {
+    dir_entry.is_file() && dir_entry.file_name() == "Cargo.toml"
+}
+
+fn is_target_dir(dir_entry: &DirEntry) -> bool {
+    dir_entry.is_dir() && dir_entry.file_name() == "target"
+}
+
+fn find_manifest_files(
     path: &Path,
     skip_target_dir: bool,
     respect_ignore_files: bool,
@@ -83,22 +94,18 @@ fn collect_paths(
     let mut builder = ignore::WalkBuilder::new(path);
 
     builder.standard_filters(respect_ignore_files);
+    builder.follow_links(true);
 
     if skip_target_dir {
-        builder.filter_entry(|entry| !entry.path().ends_with("target"));
+        builder.filter_entry(|entry| !is_target_dir(entry));
     }
-
-    let walker = builder.build();
 
     // Keep only errors and `Cargo.toml` files (filter), then map correct paths into owned
     // `PathBuf`.
-    walker
-        .into_iter()
-        .filter(|entry| match entry {
-            Ok(entry) => entry.file_name() == "Cargo.toml",
-            Err(_) => true,
-        })
-        .map(|res_entry| res_entry.map(|e| e.into_path()))
+    builder
+        .build()
+        .filter(|entry| entry.as_ref().map_or(true, is_manifest_file))
+        .map(|entry| entry.map(DirEntry::into_path))
         .collect()
 }
 
@@ -139,7 +146,7 @@ fn run_machete() -> anyhow::Result<bool> {
             args.paths
                 .iter()
                 .cloned()
-                .map(|path| path.as_os_str().to_string_lossy().to_string())
+                .map(|path| path.to_string_lossy().to_string())
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -149,13 +156,14 @@ fn run_machete() -> anyhow::Result<bool> {
     let mut walkdir_errors = Vec::new();
 
     for path in args.paths {
-        let manifest_path_entries = match collect_paths(&path, args.skip_target_dir, args.ignore) {
-            Ok(entries) => entries,
-            Err(err) => {
-                walkdir_errors.push(err);
-                continue;
-            }
-        };
+        let manifest_path_entries =
+            match find_manifest_files(&path, args.skip_target_dir, args.ignore) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    walkdir_errors.push(err);
+                    continue;
+                }
+            };
 
         // Run analysis in parallel. This will spawn new rayon tasks when dependencies are effectively
         // used by any Rust crate.
@@ -174,7 +182,7 @@ fn run_machete() -> anyhow::Result<bool> {
                     Ok(None) => {
                         log::info!(
                             "{} is a virtual manifest for a workspace",
-                            manifest_path.to_string_lossy()
+                            manifest_path.display()
                         );
                         None
                     }
@@ -191,17 +199,17 @@ fn run_machete() -> anyhow::Result<bool> {
         if results.is_empty() {
             println!(
                 "cargo-machete didn't find any unused dependencies in {}. Good job!",
-                path.to_string_lossy()
+                path.display()
             );
             continue;
         }
 
         println!(
             "cargo-machete found the following unused dependencies in {}:",
-            path.to_string_lossy()
+            path.display()
         );
         for (analysis, path) in results {
-            println!("{} -- {}:", analysis.package_name, path.to_string_lossy());
+            println!("{} -- {}:", analysis.package_name, path.display());
             for dep in &analysis.unused {
                 println!("\t{dep}");
                 has_unused_dependencies = true; // any unused dependency is enough to set flag to true
@@ -295,24 +303,27 @@ const TOP_LEVEL: &str = concat!(env!("CARGO_MANIFEST_DIR"));
 
 #[test]
 fn test_ignore_target() {
-    let entries = collect_paths(
+    let entries = find_manifest_files(
         &PathBuf::from(TOP_LEVEL).join("./integration-tests/with-target/"),
         true,
         false,
-    );
-    assert!(entries.unwrap().is_empty());
+    )
+    .unwrap();
+    assert!(entries.is_empty());
 
-    let entries = collect_paths(
+    let entries = find_manifest_files(
         &PathBuf::from(TOP_LEVEL).join("./integration-tests/with-target/"),
         false,
         true,
-    );
-    assert!(entries.unwrap().is_empty());
+    )
+    .unwrap();
+    assert!(entries.is_empty());
 
-    let entries = collect_paths(
+    let entries = find_manifest_files(
         &PathBuf::from(TOP_LEVEL).join("./integration-tests/with-target/"),
         false,
         false,
-    );
-    assert!(!entries.unwrap().is_empty());
+    )
+    .unwrap();
+    assert!(!entries.is_empty());
 }
